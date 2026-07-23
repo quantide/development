@@ -1,0 +1,505 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Neon Dash</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%; height: 100%;
+    background: #0a0a12;
+    overflow: hidden;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    touch-action: none;
+  }
+  #game {
+    display: block;
+    margin: 0 auto;
+    background: #0a0a12;
+  }
+  #ui {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+    color: #fff;
+    text-align: center;
+  }
+  #ui.hidden { display: none; }
+  .title {
+    font-size: clamp(36px, 8vw, 72px);
+    font-weight: 900;
+    letter-spacing: 4px;
+    background: linear-gradient(90deg, #00f5ff, #ff00e5, #ffe600);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    filter: drop-shadow(0 0 18px rgba(0,245,255,.5));
+    margin-bottom: 12px;
+  }
+  .sub {
+    font-size: clamp(14px, 3vw, 20px);
+    color: #9aa3b5;
+    margin-bottom: 28px;
+    line-height: 1.7;
+  }
+  .score-big {
+    font-size: clamp(40px, 9vw, 80px);
+    font-weight: 900;
+    color: #ffe600;
+    text-shadow: 0 0 24px rgba(255,230,0,.6);
+    margin-bottom: 8px;
+  }
+  .best {
+    font-size: clamp(14px, 3vw, 18px);
+    color: #00f5ff;
+    margin-bottom: 24px;
+  }
+  .btn {
+    pointer-events: auto;
+    cursor: pointer;
+    border: 2px solid #00f5ff;
+    background: rgba(0,245,255,.08);
+    color: #00f5ff;
+    font-size: clamp(16px, 3.5vw, 22px);
+    font-weight: 700;
+    padding: 14px 46px;
+    border-radius: 999px;
+    letter-spacing: 2px;
+    transition: all .15s;
+    box-shadow: 0 0 20px rgba(0,245,255,.25), inset 0 0 12px rgba(0,245,255,.1);
+  }
+  .btn:hover { background: rgba(0,245,255,.2); transform: scale(1.05); }
+  #hud {
+    position: fixed;
+    top: 14px; left: 0; right: 0;
+    display: flex;
+    justify-content: center;
+    gap: 28px;
+    color: #fff;
+    font-weight: 700;
+    font-size: clamp(15px, 3vw, 20px);
+    pointer-events: none;
+    text-shadow: 0 0 10px rgba(0,0,0,.8);
+  }
+  #hud span b { color: #ffe600; }
+  #hud span i { color: #ff00e5; font-style: normal; }
+  .newbest {
+    color: #ff00e5 !important;
+    animation: pulse .6s infinite alternate;
+  }
+  @keyframes pulse { from { opacity: .6; } to { opacity: 1; } }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="hud" style="display:none">
+  <span>SCORE <b id="hudScore">0</b></span>
+  <span>COMBO <i id="hudCombo">x1</i></span>
+</div>
+<div id="ui">
+  <div class="title">NEON DASH</div>
+  <div class="sub" id="uiSub">
+    ← → (또는 A/D, 터치)로 좌우 이동<br>
+    ◆ 장애물을 피하고 ● 오브를 먹으면 콤보!<br>
+    아슬아슬하게 스칠수록 보너스 점수
+  </div>
+  <div class="score-big" id="uiScore" style="display:none">0</div>
+  <div class="best" id="uiBest"></div>
+  <button class="btn" id="startBtn">START</button>
+</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const ui = document.getElementById('ui');
+  const uiSub = document.getElementById('uiSub');
+  const uiScore = document.getElementById('uiScore');
+  const uiBest = document.getElementById('uiBest');
+  const startBtn = document.getElementById('startBtn');
+  const hud = document.getElementById('hud');
+  const hudScore = document.getElementById('hudScore');
+  const hudCombo = document.getElementById('hudCombo');
+
+  let W, H, DPR;
+  function resize() {
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = window.innerWidth;
+    H = window.innerHeight;
+    canvas.width = W * DPR;
+    canvas.height = H * DPR;
+    canvas.style.width = W + 'px';
+    canvas.style.height = H + 'px';
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  const BEST_KEY = 'neonDashBest';
+  let best = +(localStorage.getItem(BEST_KEY) || 0);
+
+  // ---- game state ----
+  let running = false;
+  let score = 0, combo = 1, comboTimer = 0, speed = 2.0, spawnTimer = 0, orbTimer = 60, t = 0, shake = 0;
+  let obstacles = [], orbs = [], particles = [], stars = [], trail = [];
+  const player = { x: 0, y: 0, r: 13, vx: 0 };
+  const keys = {};
+
+  function initStars() {
+    stars = [];
+    for (let i = 0; i < 90; i++) {
+      stars.push({ x: Math.random() * W, y: Math.random() * H, z: Math.random() * 0.8 + 0.2 });
+    }
+  }
+  initStars();
+
+  function reset() {
+    score = 0; combo = 1; comboTimer = 0;
+    speed = 2.0;
+    spawnTimer = 0; orbTimer = 60;
+    t = 0; shake = 0;
+    obstacles = []; orbs = []; particles = []; trail = [];
+    player.x = W / 2;
+    player.y = H - 110;
+    player.vx = 0;
+  }
+
+  // ---- input ----
+  window.addEventListener('keydown', e => {
+    if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', ' '].includes(e.key)) e.preventDefault();
+    keys[e.key.toLowerCase()] = true;
+    if ((e.key === ' ' || e.key === 'Enter') && !running) start();
+  });
+  window.addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
+
+  let touchX = null;
+  window.addEventListener('touchstart', e => { touchX = e.touches[0].clientX; }, { passive: true });
+  window.addEventListener('touchmove', e => { touchX = e.touches[0].clientX; }, { passive: true });
+  window.addEventListener('touchend', () => { touchX = null; });
+
+  startBtn.addEventListener('click', start);
+
+  function start() {
+    reset();
+    running = true;
+    ui.classList.add('hidden');
+    hud.style.display = 'flex';
+  }
+
+  function gameOver() {
+    running = false;
+    burst(player.x, player.y, '#00f5ff', 60);
+    shake = 18;
+    const isNew = score > best;
+    if (isNew) { best = score; localStorage.setItem(BEST_KEY, best); }
+    setTimeout(() => {
+      uiSub.style.display = 'none';
+      uiScore.style.display = 'block';
+      uiScore.textContent = score.toLocaleString();
+      uiBest.textContent = 'BEST ' + best.toLocaleString();
+      uiBest.className = 'best' + (isNew ? ' newbest' : '');
+      if (isNew) uiBest.textContent = '🏆 NEW BEST! ' + best.toLocaleString();
+      startBtn.textContent = 'RETRY';
+      ui.classList.remove('hidden');
+      hud.style.display = 'none';
+    }, 700);
+  }
+
+  // ---- entities ----
+  function spawnObstacle() {
+    const type = Math.random();
+    if (type < 0.65) {
+      // 회전 다이아몬드
+      const size = 16 + Math.random() * 22;
+      obstacles.push({
+        kind: 'diamond',
+        x: Math.random() * (W - 80) + 40,
+        y: -50, size,
+        rot: Math.random() * Math.PI,
+        rotSpd: (Math.random() - 0.5) * 0.12,
+        vy: speed * (0.85 + Math.random() * 0.4),
+        vx: (Math.random() - 0.5) * 1.2,
+        grazed: false
+      });
+    } else {
+      // 가로 레이저 바 (한쪽에 틈)
+      const gapX = Math.random() * (W - 180) + 90;
+      const gapW = 130 + Math.random() * 70;
+      obstacles.push({
+        kind: 'bar', y: -30, gapX, gapW,
+        vy: speed * 0.75, grazed: false
+      });
+    }
+  }
+
+  function spawnOrb() {
+    orbs.push({
+      x: Math.random() * (W - 100) + 50,
+      y: -30,
+      r: 9,
+      vy: speed * 0.9,
+      phase: Math.random() * Math.PI * 2
+    });
+  }
+
+  function burst(x, y, color, n = 14) {
+    for (let i = 0; i < n; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const s = Math.random() * 5 + 1.5;
+      particles.push({
+        x, y,
+        vx: Math.cos(a) * s, vy: Math.sin(a) * s,
+        life: 1, color,
+        r: Math.random() * 3 + 1.5
+      });
+    }
+  }
+
+  function floatText(x, y, text, color) {
+    particles.push({ x, y, vx: 0, vy: -1.4, life: 1, text, color });
+  }
+
+  // ---- collision helpers ----
+  function hitDiamond(o) {
+    const dx = player.x - o.x, dy = player.y - o.y;
+    const dist = Math.hypot(dx, dy);
+    return { hit: dist < o.size * 0.72 + player.r, graze: dist < o.size + player.r + 26 };
+  }
+
+  function hitBar(o) {
+    const barH = 12;
+    if (Math.abs(player.y - o.y) > barH / 2 + player.r) return { hit: false, graze: false };
+    const inGap = player.x > o.gapX - o.gapW / 2 + player.r && player.x < o.gapX + o.gapW / 2 - player.r;
+    return { hit: !inGap, graze: inGap };
+  }
+
+  // ---- update ----
+  function update() {
+    t++;
+
+    // stars scroll
+    for (const s of stars) {
+      s.y += s.z * speed * 0.6;
+      if (s.y > H) { s.y = -2; s.x = Math.random() * W; }
+    }
+
+    if (!running) return;
+
+    // difficulty ramp
+    speed = 2.0 + t * 0.0022;
+    score += combo;
+
+    // combo decay
+    if (comboTimer > 0) comboTimer--;
+    else combo = 1;
+
+    // player move
+    const accel = 0.9, maxV = 9 + speed * 0.4, fric = 0.86;
+    if (keys['arrowleft'] || keys['a']) player.vx -= accel;
+    if (keys['arrowright'] || keys['d']) player.vx += accel;
+    if (touchX !== null) {
+      const diff = touchX - player.x;
+      player.vx += Math.sign(diff) * Math.min(Math.abs(diff) * 0.08, accel * 1.6);
+    }
+    player.vx *= fric;
+    player.vx = Math.max(-maxV, Math.min(maxV, player.vx));
+    player.x += player.vx;
+    player.x = Math.max(player.r, Math.min(W - player.r, player.x));
+
+    trail.unshift({ x: player.x, y: player.y });
+    if (trail.length > 14) trail.pop();
+
+    // spawn
+    spawnTimer--;
+    if (spawnTimer <= 0) {
+      spawnObstacle();
+      spawnTimer = Math.max(14, 78 - t * 0.016);
+    }
+    orbTimer--;
+    if (orbTimer <= 0) {
+      spawnOrb();
+      orbTimer = 90 + Math.random() * 60;
+    }
+
+    // obstacles
+    for (let i = obstacles.length - 1; i >= 0; i--) {
+      const o = obstacles[i];
+      o.y += o.vy;
+      if (o.kind === 'diamond') {
+        o.x += o.vx;
+        o.rot += o.rotSpd;
+        if (o.x < 20 || o.x > W - 20) o.vx *= -1;
+      }
+      if (o.y > H + 60) { obstacles.splice(i, 1); continue; }
+
+      const res = o.kind === 'diamond' ? hitDiamond(o) : hitBar(o);
+      if (res.hit) { gameOver(); return; }
+      // graze bonus: 스칠 때 1회
+      if (!o.grazed && res.graze && o.y > player.y - 40 && o.y < player.y + 40) {
+        o.grazed = true;
+        const bonus = 25 * combo;
+        score += bonus;
+        floatText(player.x, player.y - 26, '+' + bonus, '#00f5ff');
+        burst(player.x, player.y, '#00f5ff', 5);
+      }
+    }
+
+    // orbs
+    for (let i = orbs.length - 1; i >= 0; i--) {
+      const o = orbs[i];
+      o.y += o.vy;
+      o.phase += 0.15;
+      if (o.y > H + 30) { orbs.splice(i, 1); continue; }
+      if (Math.hypot(player.x - o.x, player.y - o.y) < o.r + player.r + 6) {
+        orbs.splice(i, 1);
+        combo = Math.min(combo + 1, 20);
+        comboTimer = 300;
+        const gain = 100 * combo;
+        score += gain;
+        floatText(o.x, o.y, '+' + gain + ' x' + combo, '#ffe600');
+        burst(o.x, o.y, '#ffe600', 16);
+        shake = Math.min(shake + 3, 8);
+      }
+    }
+
+    // particles
+    for (let i = particles.length - 1; i >= 0; i--) {
+      const p = particles[i];
+      p.x += p.vx; p.y += p.vy;
+      if (!p.text) { p.vx *= 0.96; p.vy *= 0.96; }
+      p.life -= p.text ? 0.02 : 0.03;
+      if (p.life <= 0) particles.splice(i, 1);
+    }
+
+    if (shake > 0) shake *= 0.85;
+
+    hudScore.textContent = score.toLocaleString();
+    hudCombo.textContent = 'x' + combo;
+  }
+
+  // ---- draw ----
+  function drawDiamond(o) {
+    ctx.save();
+    ctx.translate(o.x, o.y);
+    ctx.rotate(o.rot);
+    ctx.beginPath();
+    ctx.moveTo(0, -o.size);
+    ctx.lineTo(o.size * 0.7, 0);
+    ctx.lineTo(0, o.size);
+    ctx.lineTo(-o.size * 0.7, 0);
+    ctx.closePath();
+    ctx.strokeStyle = '#ff00e5';
+    ctx.lineWidth = 2.5;
+    ctx.shadowColor = '#ff00e5';
+    ctx.shadowBlur = 16;
+    ctx.stroke();
+    ctx.fillStyle = 'rgba(255,0,229,.12)';
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function drawBar(o) {
+    ctx.save();
+    ctx.shadowColor = '#ff4444';
+    ctx.shadowBlur = 14;
+    ctx.fillStyle = '#ff3355';
+    const h = 10;
+    ctx.fillRect(0, o.y - h / 2, o.gapX - o.gapW / 2, h);
+    ctx.fillRect(o.gapX + o.gapW / 2, o.y - h / 2, W - (o.gapX + o.gapW / 2), h);
+    ctx.restore();
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, W, H);
+    ctx.save();
+    if (shake > 0.5) {
+      ctx.translate((Math.random() - 0.5) * shake, (Math.random() - 0.5) * shake);
+    }
+
+    // stars
+    for (const s of stars) {
+      ctx.globalAlpha = s.z * 0.9;
+      ctx.fillStyle = '#8899ff';
+      ctx.fillRect(s.x, s.y, s.z * 2.2, s.z * 2.2);
+    }
+    ctx.globalAlpha = 1;
+
+    // orbs
+    for (const o of orbs) {
+      const pr = o.r + Math.sin(o.phase) * 2;
+      ctx.beginPath();
+      ctx.arc(o.x, o.y, pr, 0, Math.PI * 2);
+      ctx.fillStyle = '#ffe600';
+      ctx.shadowColor = '#ffe600';
+      ctx.shadowBlur = 18;
+      ctx.fill();
+      ctx.shadowBlur = 0;
+    }
+
+    // obstacles
+    for (const o of obstacles) {
+      if (o.kind === 'diamond') drawDiamond(o);
+      else drawBar(o);
+    }
+
+    // trail
+    if (running) {
+      for (let i = 0; i < trail.length; i++) {
+        const a = 1 - i / trail.length;
+        ctx.beginPath();
+        ctx.arc(trail[i].x, trail[i].y, player.r * a * 0.8, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(0,245,255,${a * 0.18})`;
+        ctx.fill();
+      }
+      // player
+      ctx.beginPath();
+      ctx.arc(player.x, player.y, player.r, 0, Math.PI * 2);
+      ctx.fillStyle = '#00f5ff';
+      ctx.shadowColor = '#00f5ff';
+      ctx.shadowBlur = 22;
+      ctx.fill();
+      ctx.shadowBlur = 0;
+      ctx.beginPath();
+      ctx.arc(player.x - 4, player.y - 4, 4, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(255,255,255,.85)';
+      ctx.fill();
+    }
+
+    // particles
+    for (const p of particles) {
+      ctx.globalAlpha = Math.max(p.life, 0);
+      if (p.text) {
+        ctx.font = '700 16px "Segoe UI", sans-serif';
+        ctx.fillStyle = p.color;
+        ctx.textAlign = 'center';
+        ctx.shadowColor = p.color;
+        ctx.shadowBlur = 8;
+        ctx.fillText(p.text, p.x, p.y);
+        ctx.shadowBlur = 0;
+      } else {
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.r * p.life, 0, Math.PI * 2);
+        ctx.fillStyle = p.color;
+        ctx.fill();
+      }
+    }
+    ctx.globalAlpha = 1;
+
+    ctx.restore();
+  }
+
+  function loop() {
+    update();
+    draw();
+    requestAnimationFrame(loop);
+  }
+  loop();
+})();
+</script>
+</body>
+</html>
