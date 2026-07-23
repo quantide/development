@@ -195,6 +195,11 @@
     bgmStep++;
   }, 165);
 
+  // 어떤 입력이든 첫 사용자 제스처에서 오디오 잠금 해제 (모바일/iframe 대응)
+  window.addEventListener('pointerdown', ensureAudio);
+  window.addEventListener('touchstart', ensureAudio, { passive: true });
+  window.addEventListener('keydown', ensureAudio);
+
   const muteBtn = document.getElementById('muteBtn');
   muteBtn.addEventListener('click', e => {
     e.stopPropagation();
