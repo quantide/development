@@ -88,6 +88,19 @@
   }
   #hud span b { color: #ffe600; }
   #hud span i { color: #ff00e5; font-style: normal; }
+  #hudLives { color: #ff3355; letter-spacing: 3px; }
+  #muteBtn {
+    position: fixed;
+    top: 10px; right: 12px;
+    z-index: 10;
+    background: rgba(0,245,255,.08);
+    border: 1.5px solid rgba(0,245,255,.4);
+    border-radius: 50%;
+    width: 42px; height: 42px;
+    font-size: 20px;
+    cursor: pointer;
+    color: #fff;
+  }
   .newbest {
     color: #ff00e5 !important;
     animation: pulse .6s infinite alternate;
@@ -100,13 +113,16 @@
 <div id="hud" style="display:none">
   <span>SCORE <b id="hudScore">0</b></span>
   <span>COMBO <i id="hudCombo">x1</i></span>
+  <span id="hudLives">♥♥♥</span>
 </div>
+<button id="muteBtn">🔊</button>
 <div id="ui">
   <div class="title">NEON DASH</div>
   <div class="sub" id="uiSub">
     화면 아무 곳이나 드래그해서 이동 (PC: ← → 또는 A/D)<br>
-    ◆ 장애물을 피하고 ● 오브를 먹으면 콤보!<br>
-    아슬아슬하게 스칠수록 보너스 점수
+    ◆ 장애물을 피하고 ● 오브를 먹으면 콤보 + 진화!<br>
+    먹을수록 커져서 피하기 어려워진다 ㅋㅋ<br>
+    목숨은 ♥×3 — 맞으면 작아지고 처음 속도로
   </div>
   <div class="score-big" id="uiScore" style="display:none">0</div>
   <div class="best" id="uiBest"></div>
@@ -125,6 +141,7 @@
   const hud = document.getElementById('hud');
   const hudScore = document.getElementById('hudScore');
   const hudCombo = document.getElementById('hudCombo');
+  const hudLives = document.getElementById('hudLives');
 
   let W, H, DPR;
   function resize() {
@@ -143,9 +160,52 @@
   const BEST_KEY = 'neonDashBest';
   let best = +(localStorage.getItem(BEST_KEY) || 0);
 
+  // ---- sound (Web Audio 합성음 — 파일 없이 코드로 소리 생성) ----
+  let actx = null, muted = false;
+  function ensureAudio() {
+    if (!actx) actx = new (window.AudioContext || window.webkitAudioContext)();
+    if (actx.state === 'suspended') actx.resume();
+  }
+  function tone(freq, dur, type, vol, freqEnd) {
+    if (muted || !actx) return;
+    const o = actx.createOscillator(), g = actx.createGain();
+    o.type = type;
+    o.frequency.setValueAtTime(freq, actx.currentTime);
+    if (freqEnd) o.frequency.exponentialRampToValueAtTime(freqEnd, actx.currentTime + dur);
+    g.gain.setValueAtTime(vol, actx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001, actx.currentTime + dur);
+    o.connect(g); g.connect(actx.destination);
+    o.start(); o.stop(actx.currentTime + dur);
+  }
+  const sfx = {
+    orb(c) { tone(520 + c * 30, 0.1, 'sine', 0.22); setTimeout(() => tone(780 + c * 30, 0.15, 'sine', 0.16), 60); },
+    graze() { tone(1500, 0.07, 'sine', 0.07, 2200); },
+    evolve() { tone(440, 0.1, 'square', 0.15); setTimeout(() => tone(660, 0.1, 'square', 0.15), 80); setTimeout(() => tone(880, 0.18, 'square', 0.15), 160); },
+    hit() { tone(220, 0.3, 'sawtooth', 0.3, 60); },
+    over() { tone(330, 0.25, 'sawtooth', 0.22, 220); setTimeout(() => tone(220, 0.3, 'sawtooth', 0.2, 110), 180); setTimeout(() => tone(147, 0.5, 'sawtooth', 0.18, 55), 400); },
+    start() { tone(330, 0.09, 'square', 0.13); setTimeout(() => tone(440, 0.09, 'square', 0.13), 90); setTimeout(() => tone(660, 0.14, 'square', 0.13), 180); }
+  };
+  // 심플 BGM: 게임 중에만 낮은 아르페지오 루프
+  const bgmNotes = [110, 0, 220, 165, 110, 0, 196, 165];
+  let bgmStep = 0;
+  setInterval(() => {
+    if (muted || !running || !actx) return;
+    const n = bgmNotes[bgmStep % bgmNotes.length];
+    if (n) { tone(n, 0.16, 'triangle', 0.06); tone(n * 2, 0.09, 'sine', 0.03); }
+    bgmStep++;
+  }, 165);
+
+  const muteBtn = document.getElementById('muteBtn');
+  muteBtn.addEventListener('click', e => {
+    e.stopPropagation();
+    muted = !muted;
+    muteBtn.textContent = muted ? '🔇' : '🔊';
+  });
+
   // ---- game state ----
   let running = false;
   let score = 0, combo = 1, comboTimer = 0, speed = 2.0, spawnTimer = 0, orbTimer = 60, t = 0, shake = 0;
+  let lives = 3, invincible = 0, orbsEaten = 0, diffT = 0;
   let obstacles = [], orbs = [], particles = [], stars = [], trail = [];
   const player = { x: 0, y: 0, r: 13, vx: 0 };
   const keys = {};
@@ -163,10 +223,44 @@
     speed = 2.0;
     spawnTimer = 0; orbTimer = 60;
     t = 0; shake = 0;
+    lives = 3; invincible = 0; orbsEaten = 0; diffT = 0;
     obstacles = []; orbs = []; particles = []; trail = [];
     player.x = W / 2;
     player.y = H - 110;
+    player.r = 13;
     player.vx = 0;
+    hudLives.textContent = '♥♥♥';
+  }
+
+  // ---- 육성: 오브를 먹을수록 커지고 색이 진화한다 (커질수록 피하기 어려움) ----
+  const STAGES = [
+    { min: 0,  color: '#00f5ff', rgb: '0,245,255' },
+    { min: 5,  color: '#ffe600', rgb: '255,230,0' },
+    { min: 10, color: '#ff9500', rgb: '255,149,0' },
+    { min: 15, color: '#ff4d29', rgb: '255,77,41' }
+  ];
+  function stage() {
+    for (let i = STAGES.length - 1; i >= 0; i--) {
+      if (orbsEaten >= STAGES[i].min) return STAGES[i];
+    }
+    return STAGES[0];
+  }
+  function playerRadius() {
+    return 13 + Math.min(orbsEaten, 18) * 0.9;
+  }
+
+  function loseLife() {
+    lives--;
+    hudLives.textContent = '♥'.repeat(Math.max(lives, 0));
+    if (lives <= 0) { gameOver(); return; }
+    sfx.hit();
+    burst(player.x, player.y, stage().color, 30);
+    shake = 12;
+    invincible = 130;           // 약 2초 무적 + 깜빡임
+    diffT = 0;                  // 낙하 속도를 처음 속도로 되돌림
+    orbsEaten = Math.max(0, orbsEaten - 5);  // 한 단계 퇴화
+    combo = 1; comboTimer = 0;
+    floatText(player.x, player.y - 30, '-1 ♥', '#ff3355');
   }
 
   // ---- input ----
@@ -195,11 +289,14 @@
     running = true;
     ui.classList.add('hidden');
     hud.style.display = 'flex';
+    ensureAudio();
+    sfx.start();
   }
 
   function gameOver() {
     running = false;
-    burst(player.x, player.y, '#00f5ff', 60);
+    sfx.over();
+    burst(player.x, player.y, stage().color, 60);
     shake = 18;
     const isNew = score > best;
     if (isNew) { best = score; localStorage.setItem(BEST_KEY, best); }
@@ -296,9 +393,13 @@
 
     if (!running) return;
 
-    // difficulty ramp
-    speed = 2.0 + t * 0.0022;
+    // difficulty ramp (피격 시 diffT가 리셋되어 속도가 처음으로 돌아감)
+    diffT++;
+    speed = 2.0 + diffT * 0.0022;
     score += combo;
+
+    if (invincible > 0) invincible--;
+    player.r = playerRadius();
 
     // combo decay
     if (comboTimer > 0) comboTimer--;
@@ -324,7 +425,7 @@
     spawnTimer--;
     if (spawnTimer <= 0) {
       spawnObstacle();
-      spawnTimer = Math.max(14, 78 - t * 0.016);
+      spawnTimer = Math.max(14, 78 - diffT * 0.016);
     }
     orbTimer--;
     if (orbTimer <= 0) {
@@ -343,15 +444,21 @@
       }
       if (o.y > H + 60) { obstacles.splice(i, 1); continue; }
 
+      if (invincible > 0) continue;   // 무적 중엔 충돌·그레이즈 없음
       const res = o.kind === 'diamond' ? hitDiamond(o) : hitBar(o);
-      if (res.hit) { gameOver(); return; }
+      if (res.hit) {
+        loseLife();
+        if (!running) return;
+        continue;
+      }
       // graze bonus: 스칠 때 1회
       if (!o.grazed && res.graze && o.y > player.y - 40 && o.y < player.y + 40) {
         o.grazed = true;
         const bonus = 25 * combo;
         score += bonus;
-        floatText(player.x, player.y - 26, '+' + bonus, '#00f5ff');
-        burst(player.x, player.y, '#00f5ff', 5);
+        sfx.graze();
+        floatText(player.x, player.y - 26, '+' + bonus, stage().color);
+        burst(player.x, player.y, stage().color, 5);
       }
     }
 
@@ -367,6 +474,14 @@
         comboTimer = 300;
         const gain = 100 * combo;
         score += gain;
+        const before = stage();
+        orbsEaten++;
+        sfx.orb(combo);
+        if (stage() !== before) {
+          sfx.evolve();
+          floatText(player.x, player.y - 46, '⚡ EVOLVE!', stage().color);
+          burst(player.x, player.y, stage().color, 24);
+        }
         floatText(o.x, o.y, '+' + gain + ' x' + combo, '#ffe600');
         burst(o.x, o.y, '#ffe600', 16);
         shake = Math.min(shake + 3, 8);
@@ -455,25 +570,30 @@
 
     // trail
     if (running) {
+      const st = stage();
+      // 무적 중 깜빡임: 8프레임 주기로 반투명
+      const blink = invincible > 0 && (t % 8 < 4);
+      ctx.globalAlpha = blink ? 0.25 : 1;
       for (let i = 0; i < trail.length; i++) {
         const a = 1 - i / trail.length;
         ctx.beginPath();
         ctx.arc(trail[i].x, trail[i].y, player.r * a * 0.8, 0, Math.PI * 2);
-        ctx.fillStyle = `rgba(0,245,255,${a * 0.18})`;
+        ctx.fillStyle = `rgba(${st.rgb},${a * 0.18 * (blink ? 0.25 : 1)})`;
         ctx.fill();
       }
       // player
       ctx.beginPath();
       ctx.arc(player.x, player.y, player.r, 0, Math.PI * 2);
-      ctx.fillStyle = '#00f5ff';
-      ctx.shadowColor = '#00f5ff';
+      ctx.fillStyle = st.color;
+      ctx.shadowColor = st.color;
       ctx.shadowBlur = 22;
       ctx.fill();
       ctx.shadowBlur = 0;
       ctx.beginPath();
-      ctx.arc(player.x - 4, player.y - 4, 4, 0, Math.PI * 2);
+      ctx.arc(player.x - player.r * 0.3, player.y - player.r * 0.3, player.r * 0.3, 0, Math.PI * 2);
       ctx.fillStyle = 'rgba(255,255,255,.85)';
       ctx.fill();
+      ctx.globalAlpha = 1;
     }
 
     // particles
