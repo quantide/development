@@ -105,6 +105,40 @@
     color: #ff00e5 !important;
     animation: pulse .6s infinite alternate;
   }
+  .tap-hint {
+    margin-top: 12px;
+    font-size: 13px;
+    color: #6b7488;
+  }
+  #skinRow {
+    display: flex;
+    gap: 18px;
+    margin-top: 28px;
+    pointer-events: auto;
+  }
+  .skin {
+    width: 42px; height: 42px;
+    border-radius: 50%;
+    border: 2.5px solid transparent;
+    cursor: pointer;
+    position: relative;
+  }
+  .skin.sel { border-color: #fff; box-shadow: 0 0 14px rgba(255,255,255,.5); }
+  .skin.locked { opacity: .4; cursor: default; }
+  .skin small {
+    position: absolute;
+    bottom: -18px; left: 50%;
+    transform: translateX(-50%);
+    font-size: 10.5px;
+    color: #8a93a8;
+    white-space: nowrap;
+  }
+  #orbWallet {
+    margin-top: 30px;
+    font-size: 14px;
+    color: #ffe600;
+    font-weight: 700;
+  }
   @keyframes pulse { from { opacity: .6; } to { opacity: 1; } }
 </style>
 </head>
@@ -127,6 +161,9 @@
   <div class="score-big" id="uiScore" style="display:none">0</div>
   <div class="best" id="uiBest"></div>
   <button class="btn" id="startBtn">START</button>
+  <div class="tap-hint">화면 아무 곳이나 탭해도 시작!</div>
+  <div id="skinRow"></div>
+  <div id="orbWallet"></div>
 </div>
 
 <script>
@@ -177,38 +214,8 @@
     o.connect(g); g.connect(actx.destination);
     o.start(); o.stop(actx.currentTime + dur);
   }
-  // 노이즈 기반 '빠삭' 크런치 (왁뿌볼 스타일)
-  let noiseBuf = null;
-  function crackle(delay, vol, freq) {
-    if (muted || !actx) return;
-    if (!noiseBuf) {
-      noiseBuf = actx.createBuffer(1, actx.sampleRate * 0.2, actx.sampleRate);
-      const d = noiseBuf.getChannelData(0);
-      for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
-    }
-    const src = actx.createBufferSource();
-    src.buffer = noiseBuf;
-    const bp = actx.createBiquadFilter();
-    bp.type = 'bandpass';
-    bp.frequency.value = freq;
-    bp.Q.value = 1.2;
-    const g = actx.createGain();
-    const t0 = actx.currentTime + delay;
-    g.gain.setValueAtTime(vol, t0);
-    g.gain.exponentialRampToValueAtTime(0.001, t0 + 0.06);
-    src.connect(bp); bp.connect(g); g.connect(actx.destination);
-    src.start(t0, Math.random() * 0.1, 0.08);
-  }
-
   const sfx = {
-    orb(c) {
-      // 왁뿌볼st 빠사삭: 노이즈 크랙 3겹 + 낮은 '뽁' + 콤보 음정 피드백
-      crackle(0, 0.5, 2600);
-      crackle(0.02, 0.35, 3600);
-      crackle(0.045, 0.28, 1800);
-      tone(180, 0.07, 'sine', 0.35, 70);
-      tone(900 + c * 40, 0.05, 'triangle', 0.08);
-    },
+    orb(c) { tone(520 + c * 30, 0.1, 'sine', 0.22); setTimeout(() => tone(780 + c * 30, 0.15, 'sine', 0.16), 60); },
     graze() { tone(1500, 0.07, 'sine', 0.07, 2200); },
     evolve() { tone(440, 0.1, 'square', 0.15); setTimeout(() => tone(660, 0.1, 'square', 0.15), 80); setTimeout(() => tone(880, 0.18, 'square', 0.15), 160); },
     hit() { tone(220, 0.3, 'sawtooth', 0.3, 60); },
@@ -241,7 +248,7 @@
   let running = false;
   let score = 0, combo = 1, comboTimer = 0, speed = 2.0, spawnTimer = 0, orbTimer = 60, t = 0, shake = 0;
   let lives = 3, invincible = 0, orbsEaten = 0, diffT = 0;
-  let wave = 1, gameT = 0, banner = null, meteorTimer = 600;
+  let wave = 1, gameT = 0, banner = null, meteorTimer = 600, recordShown = false;
   let obstacles = [], orbs = [], particles = [], stars = [], trail = [];
   const player = { x: 0, y: 0, r: 13, vx: 0 };
   const keys = {};
@@ -260,7 +267,7 @@
     spawnTimer = 0; orbTimer = 60;
     t = 0; shake = 0;
     lives = 3; invincible = 0; orbsEaten = 0; diffT = 0;
-    wave = 1; gameT = 0; banner = null; meteorTimer = 600;
+    wave = 1; gameT = 0; banner = null; meteorTimer = 600; recordShown = false;
     obstacles = []; orbs = []; particles = []; trail = [];
     player.x = W / 2;
     player.y = H - 110;
@@ -269,18 +276,44 @@
     hudLives.textContent = '♥♥♥';
   }
 
-  // ---- 육성: 오브를 먹을수록 커지고 색이 진화한다 (커질수록 피하기 어려움) ----
-  const STAGES = [
-    { min: 0,  color: '#00f5ff', rgb: '0,245,255' },
-    { min: 5,  color: '#ffe600', rgb: '255,230,0' },
-    { min: 10, color: '#ff9500', rgb: '255,149,0' },
-    { min: 15, color: '#ff4d29', rgb: '255,77,41' }
+  // ---- 스킨: 누적 오브로 색상 테마 해금 (진화 4단계 색이 통째로 바뀜) ----
+  const SKINS = [
+    { name: '네온',   cost: 0,   pal: [['#00f5ff','0,245,255'], ['#ffe600','255,230,0'], ['#ff9500','255,149,0'], ['#ff4d29','255,77,41']] },
+    { name: '오로라', cost: 50,  pal: [['#54ff9f','84,255,159'], ['#00e5d0','0,229,208'], ['#4da6ff','77,166,255'], ['#b366ff','179,102,255']] },
+    { name: '사쿠라', cost: 150, pal: [['#ffb3d9','255,179,217'], ['#ff66b3','255,102,179'], ['#ff00aa','255,0,170'], ['#cc0088','204,0,136']] },
+    { name: '골드',   cost: 300, pal: [['#fff5cc','255,245,204'], ['#ffe066','255,224,102'], ['#ffc107','255,193,7'], ['#ff8f00','255,143,0']] }
   ];
+  let totalOrbs = +(localStorage.getItem('neonDashOrbs') || 0);
+  let skinIdx = +(localStorage.getItem('neonDashSkin') || 0);
+  if (!SKINS[skinIdx] || totalOrbs < SKINS[skinIdx].cost) skinIdx = 0;
+
+  const skinRow = document.getElementById('skinRow');
+  const orbWallet = document.getElementById('orbWallet');
+  function renderSkins() {
+    skinRow.innerHTML = '';
+    SKINS.forEach((s, i) => {
+      const unlocked = totalOrbs >= s.cost;
+      const el = document.createElement('div');
+      el.className = 'skin' + (i === skinIdx ? ' sel' : '') + (unlocked ? '' : ' locked');
+      el.style.background = `linear-gradient(135deg, ${s.pal[0][0]}, ${s.pal[2][0]})`;
+      el.innerHTML = `<small>${unlocked ? s.name : '● ' + s.cost}</small>`;
+      el.addEventListener('click', () => {
+        if (!unlocked) return;
+        skinIdx = i;
+        localStorage.setItem('neonDashSkin', skinIdx);
+        renderSkins();
+      });
+      skinRow.appendChild(el);
+    });
+    orbWallet.textContent = '● 모은 오브 ' + totalOrbs.toLocaleString() + '개';
+  }
+  renderSkins();
+
+  // ---- 육성: 오브를 먹을수록 커지고 색이 진화한다 (커질수록 피하기 어려움) ----
   function stage() {
-    for (let i = STAGES.length - 1; i >= 0; i--) {
-      if (orbsEaten >= STAGES[i].min) return STAGES[i];
-    }
-    return STAGES[0];
+    const pal = SKINS[skinIdx].pal;
+    const i = orbsEaten >= 15 ? 3 : orbsEaten >= 10 ? 2 : orbsEaten >= 5 ? 1 : 0;
+    return { color: pal[i][0], rgb: pal[i][1] };
   }
   function playerRadius() {
     return 13 + Math.min(orbsEaten, 18) * 0.9;
@@ -322,6 +355,7 @@
   startBtn.addEventListener('click', start);
 
   function start() {
+    if (running) return;
     reset();
     running = true;
     ui.classList.add('hidden');
@@ -329,6 +363,16 @@
     ensureAudio();
     sfx.start();
   }
+
+  let overShownAt = 0;
+  // 탭 즉시 재시작: 타이틀/게임오버 화면에서 아무 곳이나 탭하면 시작
+  window.addEventListener('pointerdown', e => {
+    if (running) return;
+    if (ui.classList.contains('hidden')) return;
+    if (e.target === muteBtn || e.target.closest('#skinRow')) return;
+    if (overShownAt !== 0 && Date.now() - overShownAt < 600) return;  // 사망 직후 오터치 방지
+    start();
+  });
 
   function gameOver() {
     running = false;
@@ -341,12 +385,18 @@
       uiSub.style.display = 'none';
       uiScore.style.display = 'block';
       uiScore.textContent = score.toLocaleString();
-      uiBest.textContent = 'BEST ' + best.toLocaleString();
       uiBest.className = 'best' + (isNew ? ' newbest' : '');
-      if (isNew) uiBest.textContent = '🏆 NEW BEST! ' + best.toLocaleString();
+      if (isNew) {
+        uiBest.textContent = '🏆 NEW BEST! ' + best.toLocaleString();
+      } else {
+        uiBest.textContent = 'BEST ' + best.toLocaleString()
+          + ' — ' + (best - score).toLocaleString() + '점만 더!';
+      }
       startBtn.textContent = 'RETRY';
       ui.classList.remove('hidden');
       hud.style.display = 'none';
+      renderSkins();               // 이번 판에 모은 오브로 해금 상태 갱신
+      overShownAt = Date.now();
     }, 700);
   }
 
@@ -457,6 +507,13 @@
     gameT++;
     speed = 2.0 + diffT * 0.0022;
     score += combo;
+
+    // 신기록 돌파 순간 알림
+    if (best > 0 && !recordShown && score > best) {
+      recordShown = true;
+      banner = { text: '🏆 NEW RECORD!', timer: 120 };
+      sfx.evolve();
+    }
 
     // 웨이브: 25초마다 국면 전환, 새 장애물 해금 (피격과 무관하게 진행)
     const newWave = 1 + Math.floor(gameT / 1500);
@@ -579,10 +636,12 @@
         comboTimer = 300;
         const gain = 100 * combo;
         score += gain;
-        const before = stage();
+        const before = stage().color;
         orbsEaten++;
+        totalOrbs++;
+        localStorage.setItem('neonDashOrbs', totalOrbs);
         sfx.orb(combo);
-        if (stage() !== before) {
+        if (stage().color !== before) {
           sfx.evolve();
           floatText(player.x, player.y - 46, '⚡ EVOLVE!', stage().color);
           burst(player.x, player.y, stage().color, 24);
